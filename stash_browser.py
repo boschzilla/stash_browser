@@ -585,12 +585,15 @@ class StashBrowserApp(tk.Tk):
             os.makedirs(DATA_DIR, exist_ok=True)
             errors = 0
             completed = 0
+            total = len(indices)
             for idx in indices:
                 if self._cancel_requested:
                     self.after(0, lambda: self._set_status(
                         f"Cancelled — {completed}/{len(indices)} tab(s) downloaded."))
                     break
                 self.after(0, lambda i=idx: self._set_tab_dl_status(i, "downloading"))
+                self.after(0, lambda c=completed, t=total:
+                           self._set_status(f"Downloading… {c}/{t} done"))
                 success = False
                 for attempt in range(1, MAX_RETRIES + 1):
                     if self._cancel_requested:

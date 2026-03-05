@@ -607,25 +607,27 @@ class StashBrowserApp(tk.Tk):
                         completed += 1
                         success = True
                         break
-                    except RateLimitedError as e:
+                    except PermissionError as e:
+                        errors += 1
+                        self.after(0, lambda i=idx: self._set_tab_dl_status(i, "error"))
+                        self.after(0, lambda err=e: self._set_status(f"Auth error — {err}"))
+                        break
+                    except Exception as e:
                         if attempt == MAX_RETRIES:
                             errors += 1
                             self.after(0, lambda i=idx: self._set_tab_dl_status(i, "error"))
-                            self.after(0, lambda a=attempt: self._set_status(
-                                f"Gave up after {a} attempt(s) — still rate limited."))
+                            self.after(0, lambda err=e: self._set_status(
+                                f"Gave up — {type(err).__name__}: {err}"))
                             break
-                        prefix = f"Throttled  •  attempt {attempt}/{MAX_RETRIES}"
-                        wait   = e.retry_after
-                        self.after(0, lambda p=prefix: self._set_status(p))
+                        wait   = e.retry_after if isinstance(e, RateLimitedError) else self.REFRESH_INTERVAL
+                        prefix = f"Retry {attempt}/{MAX_RETRIES}"
+                        self.after(0, lambda p=prefix, err=e:
+                                   self._set_status(f"{p} — {type(err).__name__}: {err}"))
                         evt = threading.Event()
                         self._countdown_event = evt
                         self.after(0, lambda e2=evt, w=wait, p=prefix:
                                    self._countdown_tick(w, w, e2, p))
                         evt.wait()
-                    except Exception:
-                        errors += 1
-                        self.after(0, lambda i=idx: self._set_tab_dl_status(i, "error"))
-                        break
 
                 # Normal inter-tab rate-limit delay
                 if success and not self._cancel_requested:

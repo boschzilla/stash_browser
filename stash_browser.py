@@ -122,6 +122,7 @@ class StashBrowserApp(tk.Tk):
         self._tabs_meta: list[dict] = []   # raw tab list from API
         self._selected:  set[int]   = set()  # selected tab indices
         self._downloading = False
+        self._refreshing  = False
         self._cancel_requested = False
         self._countdown_event: threading.Event | None = None
 
@@ -129,6 +130,7 @@ class StashBrowserApp(tk.Tk):
         self._build_ui()
         self._load_fields()
         self.after(30_000, self._tick_ages)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ── Theme ─────────────────────────────────────────────────────────────────
 
@@ -343,13 +345,57 @@ class StashBrowserApp(tk.Tk):
         if "league"  in cfg: self.var_league.set(cfg["league"])
         if "account" in cfg: self.var_account.set(cfg["account"])
         if "sessid"  in cfg: self.var_sessid.set(cfg["sessid"])
+        if "geometry" in cfg:
+            try:
+                self.geometry(cfg["geometry"])
+            except Exception:
+                pass
+        self._restore_tab_cache(cfg)
+
+    def _restore_tab_cache(self, cfg: dict):
+        """Populate the tab tree from the cached tabs.json without hitting the API."""
+        tabs_path = os.path.join(DATA_DIR, "tabs.json")
+        if not os.path.exists(tabs_path):
+            return
+        try:
+            with open(tabs_path, "r", encoding="utf-8") as f:
+                tabs = json.load(f)
+        except Exception:
+            return
+        if not tabs:
+            return
+
+        # Populate tree (clears _selected)
+        self._populate_tab_tree(tabs, write_cache=False)
+
+        # Restore previously selected indices
+        saved_selected: list[int] = cfg.get("selected", [])
+        for idx in saved_selected:
+            iid = str(idx)
+            if not self.tab_tree.exists(iid):
+                continue
+            self._selected.add(idx)
+            vals = list(self.tab_tree.item(iid, "values"))
+            vals[1] = vals[1].replace("☐", "☑")
+            tags = list(self.tab_tree.item(iid, "tags"))
+            if "selected" not in tags:
+                tags.append("selected")
+            self.tab_tree.item(iid, values=vals, tags=tags)
+
+        self._set_status(f"{len(tabs)} tab(s) loaded from cache.")
 
     def _save_fields(self):
         save_config({
-            "league":  self.var_league.get().strip(),
-            "account": self.var_account.get().strip(),
-            "sessid":  self.var_sessid.get().strip(),
+            "league":   self.var_league.get().strip(),
+            "account":  self.var_account.get().strip(),
+            "sessid":   self.var_sessid.get().strip(),
+            "geometry": self.geometry(),
+            "selected": sorted(self._selected),
         })
+
+    def _on_close(self):
+        self._save_fields()
+        self.destroy()
 
     def _on_reload(self):
         self._save_fields()
@@ -358,7 +404,12 @@ class StashBrowserApp(tk.Tk):
 
     # ── Refresh tab list ──────────────────────────────────────────────────────
 
+    REFRESH_RETRIES  = 10   # retry up to 10 times (~10 min total)
+    REFRESH_INTERVAL = 60   # seconds between retries
+
     def _on_refresh(self):
+        if self._refreshing or self._downloading:
+            return
         league  = self.var_league.get().strip()
         account = self.var_account.get().strip()
         sessid  = self.var_sessid.get().strip()
@@ -366,26 +417,83 @@ class StashBrowserApp(tk.Tk):
             messagebox.showwarning("Missing Input", "Please fill in all fields.")
             return
         self._save_fields()
-        self.var_status.set("Fetching tab list...")
+        self._refreshing = True
+        self._cancel_requested = False
         self._set_retrieve_buttons("disabled")
+        self.btn_cancel.config(state="disabled")
+        self._set_status("Fetching tab list...")
 
         def worker():
-            try:
-                tabs = fetch_stash_tabs(sessid, account, league)
-                self.after(0, lambda: self._populate_tab_tree(tabs))
-            except Exception as e:
-                self.after(0, lambda: self._set_status(f"Error: {e}", error=True))
+            for attempt in range(1, self.REFRESH_RETRIES + 2):
+                if self._cancel_requested:
+                    self.after(0, self._on_refresh_cancelled)
+                    return
+                try:
+                    tabs = fetch_stash_tabs(sessid, account, league)
+                    self.after(0, self._on_refresh_done)
+                    self.after(0, lambda t=tabs: self._populate_tab_tree(t))
+                    return
+                except PermissionError as e:
+                    # Auth errors won't fix themselves — fail immediately
+                    msg = (f"{e}\n\n"
+                           "Make sure your POESESSID is current — log out and back in "
+                           "to pathofexile.com to get a fresh one.")
+                    self.after(0, self._on_refresh_done)
+                    self.after(0, lambda m=msg: self._refresh_error("Auth Error", m))
+                    return
+                except Exception as e:
+                    if attempt > self.REFRESH_RETRIES:
+                        msg = f"{type(e).__name__}: {e}"
+                        self.after(0, self._on_refresh_done)
+                        self.after(0, lambda m=msg: self._refresh_error("Refresh Failed", m))
+                        return
+                    # Show countdown and enable cancel for the wait
+                    prefix = f"Retry {attempt}/{self.REFRESH_RETRIES}"
+                    self.after(0, lambda p=prefix, err=e:
+                               self._set_status(f"{p} — {type(err).__name__}: {err}"))
+                    self.after(0, lambda: self.btn_cancel.config(state="normal"))
+                    self.after(0, self._throttle_frame.grid)
+                    evt = threading.Event()
+                    self._countdown_event = evt
+                    self.after(0, lambda e2=evt, p=prefix:
+                               self._countdown_tick(self.REFRESH_INTERVAL,
+                                                    self.REFRESH_INTERVAL, e2, p))
+                    evt.wait()
+                    self.after(0, self._throttle_frame.grid_remove)
+                    self.after(0, lambda: self.btn_cancel.config(state="disabled"))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _populate_tab_tree(self, tabs: list[dict]):
+    def _on_refresh_done(self):
+        self._refreshing = False
+        self._cancel_requested = False
+        self._countdown_event = None
+        self._throttle_frame.grid_remove()
+        self.btn_cancel.config(state="disabled")
+
+    def _on_refresh_cancelled(self):
+        self._refreshing = False
+        self._cancel_requested = False
+        self._countdown_event = None
+        self._throttle_frame.grid_remove()
+        self.btn_cancel.config(state="disabled")
+        self._set_retrieve_buttons("normal" if self._tabs_meta else "disabled")
+        self._set_status("Refresh cancelled.")
+
+    def _refresh_error(self, title: str, msg: str):
+        self._set_retrieve_buttons("normal" if self._tabs_meta else "disabled")
+        self._set_status(f"Error — {msg.splitlines()[0]}")
+        messagebox.showerror(title, msg)
+
+    def _populate_tab_tree(self, tabs: list[dict], write_cache: bool = True):
         self._tabs_meta = tabs
         self._selected.clear()
 
         # Persist tab metadata for items loading
-        os.makedirs(DATA_DIR, exist_ok=True)
-        with open(os.path.join(DATA_DIR, "tabs.json"), "w", encoding="utf-8") as f:
-            json.dump(tabs, f, indent=2)
+        if write_cache:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(os.path.join(DATA_DIR, "tabs.json"), "w", encoding="utf-8") as f:
+                json.dump(tabs, f, indent=2)
 
         for row in self.tab_tree.get_children():
             self.tab_tree.delete(row)
@@ -437,7 +545,10 @@ class StashBrowserApp(tk.Tk):
     def _on_cancel(self):
         self._cancel_requested = True
         self.btn_cancel.config(state="disabled")
-        self._set_status("Cancelling after current tab completes...")
+        if self._refreshing:
+            self._set_status("Cancelling refresh...")
+        else:
+            self._set_status("Cancelling after current tab completes...")
         if self._countdown_event:
             self._countdown_event.set()  # unblock worker immediately
 

@@ -18,6 +18,7 @@ from tkinter import ttk, messagebox
 import requests
 
 
+MAX_RETRIES   = 5
 BASE_URL      = "https://www.pathofexile.com"
 USER_AGENT    = "poe-stash-browser/1.0"
 SCRIPT_DIR    = os.path.dirname(os.path.abspath(__file__))
@@ -68,6 +69,12 @@ def save_config(data: dict) -> None:
         json.dump(data, f, indent=2)
 
 
+class RateLimitedError(Exception):
+    def __init__(self, retry_after: int):
+        self.retry_after = retry_after
+        super().__init__(f"Rate limited — retry after {retry_after}s")
+
+
 # ── API ───────────────────────────────────────────────────────────────────────
 
 def _make_session(poesessid: str) -> requests.Session:
@@ -96,7 +103,9 @@ def fetch_tab_items(poesessid: str, account: str, league: str, tab_index: int) -
                                "tabs": 0, "tabIndex": tab_index}, timeout=30)
     if resp.status_code == 401: raise PermissionError("Unauthorized — check your POESESSID.")
     if resp.status_code == 403: raise PermissionError("Forbidden — session may have expired.")
-    if resp.status_code == 429: raise RuntimeError("Rate limited — wait a moment.")
+    if resp.status_code == 429:
+        retry_after = int(resp.headers.get("Retry-After", 60))
+        raise RateLimitedError(retry_after)
     if resp.status_code != 200: raise RuntimeError(f"HTTP {resp.status_code}")
     return resp.json()
 
@@ -469,21 +478,45 @@ class StashBrowserApp(tk.Tk):
                         f"Cancelled — {completed}/{len(indices)} tab(s) downloaded."))
                     break
                 self.after(0, lambda i=idx: self._set_tab_dl_status(i, "downloading"))
-                try:
-                    data = fetch_tab_items(sessid, account, league, idx)
-                    path = os.path.join(DATA_DIR, f"{idx}.json")
-                    with open(path, "w", encoding="utf-8") as f:
-                        json.dump(data, f, indent=2)
-                    self.after(0, lambda i=idx: self._set_tab_dl_status(i, "done"))
-                    completed += 1
-                except Exception:
-                    errors += 1
-                    self.after(0, lambda i=idx: self._set_tab_dl_status(i, "error"))
-                # Rate-limit delay with UI countdown
-                if not self._cancel_requested:
+                success = False
+                for attempt in range(1, MAX_RETRIES + 1):
+                    if self._cancel_requested:
+                        break
+                    try:
+                        data = fetch_tab_items(sessid, account, league, idx)
+                        path = os.path.join(DATA_DIR, f"{idx}.json")
+                        with open(path, "w", encoding="utf-8") as f:
+                            json.dump(data, f, indent=2)
+                        self.after(0, lambda i=idx: self._set_tab_dl_status(i, "done"))
+                        completed += 1
+                        success = True
+                        break
+                    except RateLimitedError as e:
+                        if attempt == MAX_RETRIES:
+                            errors += 1
+                            self.after(0, lambda i=idx: self._set_tab_dl_status(i, "error"))
+                            self.after(0, lambda a=attempt: self._set_status(
+                                f"Gave up after {a} attempt(s) — still rate limited."))
+                            break
+                        prefix = f"Throttled  •  attempt {attempt}/{MAX_RETRIES}"
+                        wait   = e.retry_after
+                        self.after(0, lambda p=prefix: self._set_status(p))
+                        evt = threading.Event()
+                        self._countdown_event = evt
+                        self.after(0, lambda e2=evt, w=wait, p=prefix:
+                                   self._countdown_tick(w, w, e2, p))
+                        evt.wait()
+                    except Exception:
+                        errors += 1
+                        self.after(0, lambda i=idx: self._set_tab_dl_status(i, "error"))
+                        break
+
+                # Normal inter-tab rate-limit delay
+                if success and not self._cancel_requested:
                     evt = threading.Event()
                     self._countdown_event = evt
-                    self.after(0, lambda e=evt: self._countdown_tick(REQUEST_DELAY, REQUEST_DELAY, e))
+                    self.after(0, lambda e=evt: self._countdown_tick(
+                        REQUEST_DELAY, REQUEST_DELAY, e, "Throttling"))
                     evt.wait()
 
             if not self._cancel_requested:
@@ -593,7 +626,8 @@ class StashBrowserApp(tk.Tk):
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _countdown_tick(self, remaining: float, total: float, event: threading.Event):
+    def _countdown_tick(self, remaining: float, total: float,
+                        event: threading.Event, prefix: str = "Throttling"):
         if event.is_set():
             self._throttle_var.set(0)
             self._throttle_label.config(text="")
@@ -605,8 +639,9 @@ class StashBrowserApp(tk.Tk):
             return
         pct = (remaining / total) * 100
         self._throttle_var.set(pct)
-        self._throttle_label.config(text=f"Next in {remaining:.1f}s")
-        self.after(100, lambda: self._countdown_tick(round(remaining - 0.1, 1), total, event))
+        self._throttle_label.config(text=f"{prefix}  {remaining:.1f}s")
+        self.after(100, lambda: self._countdown_tick(
+            round(remaining - 0.1, 1), total, event, prefix))
 
     def _tab_item_count(self, idx: int) -> str:
         path = os.path.join(DATA_DIR, f"{idx}.json")

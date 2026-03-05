@@ -4,6 +4,8 @@ A lightweight desktop GUI for browsing and downloading Path of Exile 1 stash tab
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
+![PoE Stash Browser](image.png)
+
 > Not affiliated with or endorsed by Grinding Gear Games.
 
 ## Features

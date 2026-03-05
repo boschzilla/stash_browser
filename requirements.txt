@@ -1,0 +1,8 @@
+mss
+opencv-python
+numpy
+pyautogui
+easyocr
+Pillow
+keyboard
+anthropic>=0.40.0

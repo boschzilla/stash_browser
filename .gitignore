@@ -1,0 +1,48 @@
+# Credentials & config with secrets
+stash_browser_config.json
+config.json
+
+# Stash data downloads
+stash_data/
+poe_stash_data/
+poe_stash_data1/
+stash_data*/
+poe_stash_data*/
+
+# Price caches
+pricer_cache_*.json
+poe_ninja_prices.json
+poe_report_data.json
+poe_special_items.json
+build_optimizer_config.json
+
+# Debug output
+debug_*.png
+debug_*.csv
+
+# Logs
+Client.txt
+
+# Installers & archives
+*.zip
+*.exe
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/

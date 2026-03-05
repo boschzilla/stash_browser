@@ -19,6 +19,15 @@ import requests
 
 
 MAX_RETRIES   = 5
+STALE_OPTIONS = {
+    "1 minute":   60,
+    "5 minutes":  300,
+    "15 minutes": 900,
+    "1 hour":     3600,
+    "6 hours":    21600,
+    "1 day":      86400,
+    "1 week":     604800,
+}
 BASE_URL      = "https://www.pathofexile.com"
 USER_AGENT    = "poe-stash-browser/1.0"
 SCRIPT_DIR    = os.path.dirname(os.path.abspath(__file__))
@@ -241,6 +250,18 @@ class StashBrowserApp(tk.Tk):
                                      command=self._on_cancel, state="disabled")
         self.btn_cancel.pack(side="left", padx=4)
 
+        ttk.Separator(btn_row, orient="vertical").pack(side="left", fill="y", padx=8, pady=2)
+
+        self.var_stale = tk.StringVar(value="1 hour")
+        stale_combo = ttk.Combobox(btn_row, textvariable=self.var_stale,
+                                   values=list(STALE_OPTIONS.keys()),
+                                   width=11, state="readonly")
+        stale_combo.pack(side="left", padx=(0, 4))
+
+        self.btn_retrieve_stale = ttk.Button(btn_row, text="Retrieve Stale",
+                                             command=self._on_retrieve_stale, state="disabled")
+        self.btn_retrieve_stale.pack(side="left", padx=4)
+
         sel_lbl = tk.Label(btn_row, text="(click row to toggle selection)",
                            bg=BG, fg=FG_DIM, font=("Segoe UI", 9))
         sel_lbl.pack(side="left", padx=10)
@@ -347,6 +368,8 @@ class StashBrowserApp(tk.Tk):
         if "league"  in cfg: self.var_league.set(cfg["league"])
         if "account" in cfg: self.var_account.set(cfg["account"])
         if "sessid"  in cfg: self.var_sessid.set(cfg["sessid"])
+        if "stale_threshold" in cfg and cfg["stale_threshold"] in STALE_OPTIONS:
+            self.var_stale.set(cfg["stale_threshold"])
         if "geometry" in cfg:
             try:
                 self.geometry(cfg["geometry"])
@@ -388,11 +411,12 @@ class StashBrowserApp(tk.Tk):
 
     def _save_fields(self):
         save_config({
-            "league":   self.var_league.get().strip(),
-            "account":  self.var_account.get().strip(),
-            "sessid":   self.var_sessid.get().strip(),
-            "geometry": self.geometry(),
-            "selected": sorted(self._selected),
+            "league":          self.var_league.get().strip(),
+            "account":         self.var_account.get().strip(),
+            "sessid":          self.var_sessid.get().strip(),
+            "geometry":        self.geometry(),
+            "selected":        sorted(self._selected),
+            "stale_threshold": self.var_stale.get(),
         })
 
     def _on_close(self):
@@ -563,6 +587,21 @@ class StashBrowserApp(tk.Tk):
     def _on_retrieve_all(self):
         indices = [t.get("i", 0) for t in self._tabs_meta]
         self._start_download(indices)
+
+    def _on_retrieve_stale(self):
+        threshold = STALE_OPTIONS.get(self.var_stale.get(), 3600)
+        now = time.time()
+        stale = []
+        for tab in self._tabs_meta:
+            idx  = tab.get("i", 0)
+            path = os.path.join(DATA_DIR, f"{idx}.json")
+            if not os.path.exists(path) or (now - os.path.getmtime(path)) >= threshold:
+                stale.append(idx)
+        if not stale:
+            messagebox.showinfo("Nothing Stale",
+                                f"All tabs were updated within the last {self.var_stale.get()}.")
+            return
+        self._start_download(stale)
 
     def _start_download(self, indices: list[int]):
         league  = self.var_league.get().strip()
@@ -806,6 +845,7 @@ class StashBrowserApp(tk.Tk):
     def _set_retrieve_buttons(self, state: str):
         self.btn_retrieve_sel.config(state=state)
         self.btn_retrieve_all.config(state=state)
+        self.btn_retrieve_stale.config(state=state)
         if state == "normal":
             self.btn_cancel.config(state="disabled")
 

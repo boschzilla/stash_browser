@@ -91,7 +91,9 @@ def fetch_stash_tabs(poesessid: str, account: str, league: str) -> list[dict]:
                                "tabs": 1, "tabIndex": 0}, timeout=30)
     if resp.status_code == 401: raise PermissionError("Unauthorized — check your POESESSID.")
     if resp.status_code == 403: raise PermissionError("Forbidden — session may have expired.")
-    if resp.status_code == 429: raise RuntimeError("Rate limited — wait a moment.")
+    if resp.status_code == 429:
+        retry_after = int(resp.headers.get("Retry-After", 60))
+        raise RateLimitedError(retry_after)
     if resp.status_code != 200: raise RuntimeError(f"HTTP {resp.status_code}")
     return resp.json().get("tabs", [])
 
@@ -447,7 +449,8 @@ class StashBrowserApp(tk.Tk):
                         self.after(0, self._on_refresh_done)
                         self.after(0, lambda m=msg: self._refresh_error("Refresh Failed", m))
                         return
-                    # Show countdown and enable cancel for the wait
+                    # Use server-supplied wait time if available, else fixed interval
+                    wait   = e.retry_after if isinstance(e, RateLimitedError) else self.REFRESH_INTERVAL
                     prefix = f"Retry {attempt}/{self.REFRESH_RETRIES}"
                     self.after(0, lambda p=prefix, err=e:
                                self._set_status(f"{p} — {type(err).__name__}: {err}"))
@@ -455,9 +458,8 @@ class StashBrowserApp(tk.Tk):
                     self.after(0, self._throttle_frame.grid)
                     evt = threading.Event()
                     self._countdown_event = evt
-                    self.after(0, lambda e2=evt, p=prefix:
-                               self._countdown_tick(self.REFRESH_INTERVAL,
-                                                    self.REFRESH_INTERVAL, e2, p))
+                    self.after(0, lambda e2=evt, w=wait, p=prefix:
+                               self._countdown_tick(w, w, e2, p))
                     evt.wait()
                     self.after(0, self._throttle_frame.grid_remove)
                     self.after(0, lambda: self.btn_cancel.config(state="disabled"))
